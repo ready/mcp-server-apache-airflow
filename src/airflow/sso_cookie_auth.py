@@ -5,6 +5,8 @@ Supports enterprise identity providers like Okta, Azure AD, Ping Identity, etc.
 Uses Playwright to capture SSO session cookies via browser-based login.
 """
 
+import asyncio
+import concurrent.futures
 import json
 import os
 import sys
@@ -153,7 +155,8 @@ class AirflowCookieAuth:
         except requests.RequestException:
             return False
 
-    def _interactive_login_and_capture(self) -> List[dict]:
+    def _interactive_login_and_capture_sync(self) -> List[dict]:
+        """Synchronous implementation of browser-based SSO login."""
         try:
             from playwright.sync_api import sync_playwright
         except ImportError:
@@ -215,6 +218,25 @@ class AirflowCookieAuth:
             )
 
         return cookies
+
+    def _interactive_login_and_capture(self) -> List[dict]:
+        """
+        Run browser-based SSO login in a thread pool to avoid asyncio conflicts.
+
+        Playwright's sync API cannot run inside an asyncio event loop,
+        so we run it in a separate thread when needed.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No event loop running, safe to use sync API directly
+            return self._interactive_login_and_capture_sync()
+
+        # Running inside an event loop - execute in thread pool
+        print("[SSO] Running browser login in thread pool (async context detected)", file=sys.stderr)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(self._interactive_login_and_capture_sync)
+            return future.result(timeout=360)  # 6 minute timeout
 
     def _is_cookie_expired(self, payload: Dict[str, Any]) -> bool:
         captured_at = payload.get("captured_at", 0)
