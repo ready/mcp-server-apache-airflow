@@ -53,9 +53,9 @@ class SSORESTClient(RESTClientObject):
             )
 
     def set_sso_auth(self, sso_auth):
-        """Set the SSO auth handler."""
+        """Set the SSO auth handler. Cookies are fetched lazily on first request."""
         self._sso_auth = sso_auth
-        self._refresh_cookies()
+        # Don't refresh cookies here - defer until first request to avoid blocking server startup
 
     def _refresh_cookies(self):
         """Refresh SSO cookies."""
@@ -70,6 +70,10 @@ class SSORESTClient(RESTClientObject):
         """Override request to inject SSO cookies."""
         if headers is None:
             headers = {}
+
+        # Lazy initialization: fetch cookies on first request
+        if self._sso_auth and self._cookie_header is None:
+            self._refresh_cookies()
 
         # Inject SSO cookie header if available
         if self._cookie_header:
