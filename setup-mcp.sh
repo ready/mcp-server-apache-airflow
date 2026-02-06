@@ -32,6 +32,10 @@
 #   ./setup-mcp.sh disable     → Avoid login prompts on tool startup
 #   ./setup-mcp.sh enable      → Re-enable when back on VPN
 #
+# CROSS-REPO SUPPORT:
+#   Setup/disable/enable also manage configs in external repos (default: ../airflow).
+#   Override with .mcp-repos file (one path per line, relative to this script).
+#
 # Usage:
 #   ./setup-mcp.sh claude   # Setup Claude Code (triggers SSO login)
 #   ./setup-mcp.sh vscode   # Setup VSCode Copilot (reuses SSO cookies)
@@ -57,6 +61,50 @@ VSCODE_CONFIG="$SCRIPT_DIR/.vscode/mcp.json"
 
 # AmpCode uses global VSCode settings
 AMPCODE_SETTINGS="$HOME/Library/Application Support/Code/User/settings.json"
+
+# ============================================================================
+# EXTERNAL REPOS (cross-repo MCP config management)
+# ============================================================================
+# By default, setup/disable/enable also manage MCP configs in ../airflow.
+# Override by creating .mcp-repos with one repo path per line.
+
+MCP_REPOS_FILE="$SCRIPT_DIR/.mcp-repos"
+
+get_external_repos() {
+    if [ -f "$MCP_REPOS_FILE" ]; then
+        local repos=()
+        while IFS= read -r line || [ -n "$line" ]; do
+            # Skip empty lines and comments
+            line="$(echo "$line" | sed 's/#.*//' | xargs)"
+            [ -z "$line" ] && continue
+            repos+=("$line")
+        done < "$MCP_REPOS_FILE"
+        echo "${repos[@]}"
+    else
+        echo "../airflow"
+    fi
+}
+
+resolve_repo_path() {
+    local repo="$1"
+    local resolved
+
+    # Resolve relative paths from SCRIPT_DIR
+    if [[ "$repo" != /* ]]; then
+        resolved="$(cd "$SCRIPT_DIR" && cd "$repo" 2>/dev/null && pwd)" || true
+    else
+        resolved="$repo"
+    fi
+
+    # Return empty if directory doesn't exist
+    if [ -n "$resolved" ] && [ -d "$resolved" ]; then
+        echo "$resolved"
+    fi
+}
+
+repo_basename() {
+    basename "$(resolve_repo_path "$1" || echo "$1")"
+}
 
 # ============================================================================
 # OUTPUT HELPERS
@@ -274,7 +322,7 @@ ampcode_disable() {
 
 show_status() {
     echo ""
-    echo -e "${BLUE}Config Status${NC}"
+    echo -e "${BLUE}Config Status — $(basename "$SCRIPT_DIR")${NC}"
     echo ""
 
     # Claude Code
@@ -311,6 +359,42 @@ show_status() {
         echo -e "  SSO cookies  (.airflow_state/)       ${YELLOW}not yet${NC}"
     fi
 
+    # External repos
+    for repo in $(get_external_repos); do
+        local repo_path
+        repo_path="$(resolve_repo_path "$repo")"
+        if [ -z "$repo_path" ]; then
+            echo ""
+            echo -e "${BLUE}Config Status — $repo${NC}"
+            echo -e "  ${YELLOW}repo not found${NC}"
+            continue
+        fi
+
+        local name
+        name="$(basename "$repo_path")"
+        echo ""
+        echo -e "${BLUE}Config Status — $name${NC}"
+        echo ""
+
+        local ext_claude="$repo_path/.mcp.json"
+        if [ -f "$ext_claude" ]; then
+            echo -e "  Claude Code  (.mcp.json)             ${GREEN}enabled${NC}"
+        elif [ -f "${ext_claude}.disabled" ]; then
+            echo -e "  Claude Code  (.mcp.json)             ${RED}disabled${NC}"
+        else
+            echo -e "  Claude Code  (.mcp.json)             ${YELLOW}not setup${NC}"
+        fi
+
+        local ext_vscode="$repo_path/.vscode/mcp.json"
+        if [ -f "$ext_vscode" ]; then
+            echo -e "  VSCode       (.vscode/mcp.json)      ${GREEN}enabled${NC}"
+        elif [ -f "${ext_vscode}.disabled" ]; then
+            echo -e "  VSCode       (.vscode/mcp.json)      ${RED}disabled${NC}"
+        else
+            echo -e "  VSCode       (.vscode/mcp.json)      ${YELLOW}not setup${NC}"
+        fi
+    done
+
     echo ""
 }
 
@@ -322,6 +406,7 @@ create_config() {
     local example="$1"
     local config="$2"
     local name="$3"
+    local project_dir="${4:-$SCRIPT_DIR}"  # Default to SCRIPT_DIR for local configs
 
     if [ ! -f "$example" ]; then
         log_warn "Example not found: $example"
@@ -342,9 +427,37 @@ create_config() {
         return 0
     fi
 
-    # Replace $PROJECT_DIR with actual path
+    # Replace $PROJECT_DIR — always points to SCRIPT_DIR so SSO cookies are shared
     sed "s|\\\$PROJECT_DIR|$SCRIPT_DIR|g" "$example" > "$config"
     log_info "Created $name"
+}
+
+setup_external_repos_claude() {
+    for repo in $(get_external_repos); do
+        local repo_path
+        repo_path="$(resolve_repo_path "$repo")"
+        if [ -z "$repo_path" ]; then
+            log_warn "External repo not found: $repo (skipping)"
+            continue
+        fi
+        local name
+        name="$(basename "$repo_path")"
+        create_config "$CLAUDE_EXAMPLE" "$repo_path/.mcp.json" "$name — Claude Code (.mcp.json)"
+    done
+}
+
+setup_external_repos_vscode() {
+    for repo in $(get_external_repos); do
+        local repo_path
+        repo_path="$(resolve_repo_path "$repo")"
+        if [ -z "$repo_path" ]; then
+            log_warn "External repo not found: $repo (skipping)"
+            continue
+        fi
+        local name
+        name="$(basename "$repo_path")"
+        create_config "$VSCODE_EXAMPLE" "$repo_path/.vscode/mcp.json" "$name — VSCode (.vscode/mcp.json)"
+    done
 }
 
 # ============================================================================
@@ -356,6 +469,7 @@ setup_claude() {
     echo -e "${BLUE}Setting up Claude Code...${NC}"
     echo ""
     create_config "$CLAUDE_EXAMPLE" "$CLAUDE_CONFIG" "Claude Code (.mcp.json)"
+    setup_external_repos_claude
     echo ""
     echo "Next steps:"
     echo "  1. Restart Claude Code in this project"
@@ -370,6 +484,7 @@ setup_vscode() {
     echo -e "${BLUE}Setting up VSCode Copilot...${NC}"
     echo ""
     create_config "$VSCODE_EXAMPLE" "$VSCODE_CONFIG" "VSCode (.vscode/mcp.json)"
+    setup_external_repos_vscode
     echo ""
     echo "Restart VSCode to load MCP."
     echo "SSO cookies are shared - no re-login needed."
@@ -394,6 +509,8 @@ setup_all() {
     create_config "$CLAUDE_EXAMPLE" "$CLAUDE_CONFIG" "Claude Code (.mcp.json)"
     create_config "$VSCODE_EXAMPLE" "$VSCODE_CONFIG" "VSCode (.vscode/mcp.json)"
     ampcode_add
+    setup_external_repos_claude
+    setup_external_repos_vscode
     echo ""
     echo "Restart Claude Code first to trigger SSO login."
     echo "Other tools will reuse the saved cookies."
@@ -427,6 +544,29 @@ disable_all() {
         ampcode_disable
         disabled=$((disabled + 1))
     fi
+
+    # Disable in external repos
+    for repo in $(get_external_repos); do
+        local repo_path
+        repo_path="$(resolve_repo_path "$repo")"
+        [ -z "$repo_path" ] && continue
+        local name
+        name="$(basename "$repo_path")"
+
+        local ext_claude="$repo_path/.mcp.json"
+        if [ -f "$ext_claude" ]; then
+            mv "$ext_claude" "${ext_claude}.disabled"
+            log_info "Disabled $name — Claude Code"
+            disabled=$((disabled + 1))
+        fi
+
+        local ext_vscode="$repo_path/.vscode/mcp.json"
+        if [ -f "$ext_vscode" ]; then
+            mv "$ext_vscode" "${ext_vscode}.disabled"
+            log_info "Disabled $name — VSCode Copilot"
+            disabled=$((disabled + 1))
+        fi
+    done
 
     if [ $disabled -eq 0 ]; then
         log_warn "No configs to disable"
@@ -462,6 +602,29 @@ enable_all() {
         ampcode_add
         enabled=$((enabled + 1))
     fi
+
+    # Enable in external repos
+    for repo in $(get_external_repos); do
+        local repo_path
+        repo_path="$(resolve_repo_path "$repo")"
+        [ -z "$repo_path" ] && continue
+        local name
+        name="$(basename "$repo_path")"
+
+        local ext_claude="$repo_path/.mcp.json"
+        if [ -f "${ext_claude}.disabled" ]; then
+            mv "${ext_claude}.disabled" "$ext_claude"
+            log_info "Enabled $name — Claude Code"
+            enabled=$((enabled + 1))
+        fi
+
+        local ext_vscode="$repo_path/.vscode/mcp.json"
+        if [ -f "${ext_vscode}.disabled" ]; then
+            mv "${ext_vscode}.disabled" "$ext_vscode"
+            log_info "Enabled $name — VSCode Copilot"
+            enabled=$((enabled + 1))
+        fi
+    done
 
     if [ $enabled -eq 0 ]; then
         log_warn "No disabled configs found"
