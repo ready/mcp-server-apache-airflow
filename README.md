@@ -1,200 +1,13 @@
-# Apache Airflow MCP Server — SSO Authentication Extension
+# Apache Airflow MCP Server
 
-## Purpose
+MCP server for Apache Airflow, configured for the Ready data team with basic auth and read-only access.
 
-This document describes a fork of the public Apache Airflow MCP server with an enterprise SSO cookie-based authentication extension. The extension integrates Playwright-driven SSO login, encrypted cookie persistence, and automatic session refresh into the existing Airflow SDK client — without rewriting upstream transport logic.
-
-| Repository       | URL                                                       |
-| ---------------- | --------------------------------------------------------- |
-| **Upstream**     | https://github.com/yangkyeongmo/mcp-server-apache-airflow |
-| **Fork (Ready)** | https://github.com/ready/mcp-server-apache-airflow        |
-
-> **Initial Design Doc:** [AMP CLI + Airflow via MCP](https://readybossplatform.atlassian.net/wiki/spaces/II/pages/511475713/AMP+Airflow+via+MCP) (Confluence, may be outdated — this README is the source of truth)
+| Repository   | URL                                                       |
+| ------------ | --------------------------------------------------------- |
+| **Upstream** | https://github.com/yangkyeongmo/mcp-server-apache-airflow |
+| **Ready**    | https://github.com/ready/mcp-server-apache-airflow        |
 
 > **New to this repo?** See [Getting Started](GETTING-STARTED.md) for quick setup and example prompts.
-
----
-
-## Why This Fork?
-
-We forked [yangkyeongmo/mcp-server-apache-airflow](https://github.com/yangkyeongmo/mcp-server-apache-airflow) for its stability, clean API abstraction, and extensible architecture — allowing us to add SSO cookie-based auth without rewriting core logic.
-
-⚠️ **Airflow 2.x EOL: April 2026** — This MCP server primarily supports Airflow 2.x (`/api/v1`). Airflow 3.0 requires JWT auth which may not be compatible with our SSO approach.
-
-📖 **See [Airflow MCP Servers](AIRFLOW-MCP-SERVERS.md)** for alternative servers comparison and v3 migration options.
-
----
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              MCP Client (AMP)                               │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                      │
-                                      ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         mcp-server-apache-airflow                           │
-│  ┌───────────────────────────────────────────────────────────────────────┐  │
-│  │                      create_api_client()                              │  │
-│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐   │  │
-│  │  │ SSO Cookie  │◀─│ JWT Token   │◀─│ Basic Auth  │◀─│ Unauth      │   │  │
-│  │  │ (priority 1)│  │ (priority 2)│  │ (priority 3)│  │ (fallback)  │   │  │
-│  │  └──────┬──────┘  └─────────────┘  └─────────────┘  └─────────────┘   │  │
-│  └─────────┼─────────────────────────────────────────────────────────────┘  │
-│            │                                                                 │
-│            ▼                                                                 │
-│  ┌───────────────────────────────────────────────────────────────────────┐  │
-│  │                        SSORESTClient                                  │  │
-│  │  • Injects Cookie header into requests                                │  │
-│  │  • Refreshes cookies on 401/403/302                                   │  │
-│  │  • Thread-safe cookie refresh via lock                                │  │
-│  └──────┬────────────────────────────────────────────────────────────────┘  │
-│         │                                                                    │
-│         ▼                                                                    │
-│  ┌───────────────────────────────────────────────────────────────────────┐  │
-│  │                     EncryptedCookieStore                              │  │
-│  │  ┌─────────────┐    ┌─────────────────┐                               │  │
-│  │  │ key (Fernet)│───▶│ cookies.enc     │                               │  │
-│  │  │ (AES-128)   │    │ (encrypted JSON)│                               │  │
-│  │  └─────────────┘    └─────────────────┘                               │  │
-│  └───────────────────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                      │
-              ┌───────────────────────┴───────────────────────┐
-              │                                               │
-              ▼                                               ▼
-┌──────────────────────────┐                    ┌──────────────────────────┐
-│   Playwright (Chromium)  │                    │     Airflow REST API     │
-│   • Opens SSO login page │                    │     /api/v1/*            │
-│   • Captures cookies     │                    │                          │
-│   • 5-minute timeout     │                    │                          │
-└──────────────────────────┘                    └──────────────────────────┘
-              │                                               ▲
-              ▼                                               │
-┌──────────────────────────┐                                  │
-│   Enterprise IdP         │                                  │
-│   (Okta, Azure AD, etc.) │──────────────────────────────────┘
-└──────────────────────────┘
-```
-
----
-
-## Authentication Flow
-
-```
-1. MCP server starts
-2. create_api_client() checks AIRFLOW_SSO_AUTH=true
-3. Load encrypted cookies from {STATE_DIR}/cookies.enc
-   │
-   ├─▶ Cookies exist & valid?
-   │      │
-   │      ├─▶ YES: Decrypt with Fernet key, validate against API
-   │      │         └─▶ API returns 200? Use session
-   │      │         └─▶ API returns 401/403? → Trigger re-auth
-   │      │
-   │      └─▶ NO (expired/missing/corrupted):
-   │
-   └─▶ Launch Playwright browser
-         │
-         ├─▶ Navigate to AIRFLOW_HOST
-         ├─▶ User completes SSO login (5-min timeout)
-         ├─▶ Poll /api/v1/dags until 200
-         ├─▶ Capture cookies from browser context
-         ├─▶ Encrypt & save to cookies.enc
-         └─▶ Return authenticated session
-```
-
----
-
-## Environment Variables
-
-| Variable                       | Type      | Default                   | Description                                              |
-| ------------------------------ | --------- | ------------------------- | -------------------------------------------------------- |
-| `AIRFLOW_HOST`                 | string    | `http://localhost:8080`   | Airflow base URL (required for production)               |
-| `AIRFLOW_SSO_AUTH`             | bool      | `false`                   | Enable SSO cookie-based authentication                   |
-| `AIRFLOW_STATE_DIR`            | path      | `~/.airflow_cookie_state` | Directory for encrypted cookie/key storage               |
-| `AIRFLOW_HEADLESS`             | bool      | `false`                   | Run Playwright browser in headless mode                  |
-| `AIRFLOW_MAX_COOKIE_AGE_HOURS` | int       | `24`                      | Force re-authentication after N hours                    |
-| `AIRFLOW_VERIFY`               | bool/path | `true`                    | TLS verification (`true`, `false`, or path to CA bundle) |
-| `AIRFLOW_COOKIE_KEY`           | string    | auto-generated            | Override Fernet encryption key (base64-encoded)          |
-| `AIRFLOW_JWT_TOKEN`            | string    | —                         | JWT bearer token (if not using SSO)                      |
-| `AIRFLOW_USERNAME`             | string    | —                         | Basic auth username (if not using SSO/JWT)               |
-| `AIRFLOW_PASSWORD`             | string    | —                         | Basic auth password (if not using SSO/JWT)               |
-| `AIRFLOW_API_VERSION`          | string    | `v1`                      | Airflow REST API version                                 |
-| `READ_ONLY`                    | bool      | `false`                   | Restrict to read-only API operations                     |
-
----
-
-## Files Added & Modified
-
-### NEW: `src/airflow/sso_cookie_auth.py`
-
-**Role:** Implements SSO-based session acquisition, cookie encryption, caching, and refresh.
-
-**Classes:**
-
-| Class                  | Responsibility                                                        |
-| ---------------------- | --------------------------------------------------------------------- |
-| `AirflowAuthConfig`    | Dataclass holding auth configuration                                  |
-| `EncryptedCookieStore` | Manages Fernet key generation, cookie encryption/decryption, file I/O |
-| `AirflowCookieAuth`    | Orchestrates Playwright login, cookie capture, session validation     |
-
-**Key Methods:**
-
-```python
-EncryptedCookieStore._get_key()      # Load/generate Fernet key
-EncryptedCookieStore.save(payload)   # Encrypt and persist cookies
-EncryptedCookieStore.load()          # Decrypt and return cookies
-
-AirflowCookieAuth.ensure_session()   # Get valid session (cached or fresh)
-AirflowCookieAuth.get_cookie_header() # Return "Cookie: ..." header value
-```
-
-### MODIFIED: `src/airflow/airflow_client.py`
-
-**Purpose:** Extend upstream Airflow SDK client to support SSO cookie injection.
-
-**New Class: `SSORESTClient`**
-
-Subclass of `RESTClientObject` that:
-- Injects `Cookie` header into every request
-- Refreshes cookies on `401`, `403`, or `302` responses
-- Retries failed request once after refreshing
-- Maintains thread-safe cookie refresh via `threading.Lock`
-
----
-
-## Cookie Storage & Security
-
-### File Locations
-
-| File              | Path                      | Permissions | Contents                   |
-| ----------------- | ------------------------- | ----------- | -------------------------- |
-| Fernet key        | `{STATE_DIR}/key`         | `0600`      | 32-byte base64-encoded key |
-| Encrypted cookies | `{STATE_DIR}/cookies.enc` | `0600`      | Fernet-encrypted JSON blob |
-
-### Encryption Details
-
-- **Algorithm:** Fernet (AES-128-CBC + HMAC-SHA256)
-- **Key source priority:**
-  1. `AIRFLOW_COOKIE_KEY` environment variable
-  2. Auto-generated file at `{STATE_DIR}/key`
-- **Payload format:**
-  ```json
-  {
-    "cookies": [{"name": "session", "value": "...", "domain": "...", "path": "/"}],
-    "captured_at": 1706198400
-  }
-  ```
-
-### Key Rotation
-
-To rotate the encryption key:
-```bash
-rm -f $AIRFLOW_STATE_DIR/key $AIRFLOW_STATE_DIR/cookies.enc
-# Next run will generate new key and require re-authentication
-```
 
 ---
 
@@ -203,66 +16,54 @@ rm -f $AIRFLOW_STATE_DIR/key $AIRFLOW_STATE_DIR/cookies.enc
 ```bash
 git clone git@github.com:ready/mcp-server-apache-airflow.git
 cd mcp-server-apache-airflow
-uv sync --extra sso
-uv run playwright install chromium
-
-./setup-mcp.sh claude   # Setup Claude Code → Restart → SSO login
-./setup-mcp.sh vscode   # Setup VSCode Copilot (reuses cookies)
-./setup-mcp.sh ampcode  # Setup AmpCode (reuses cookies)
+cp .env.example .env   # fill in AIRFLOW_PASSWORD (ask data team lead)
+uv sync
+./setup-mcp.sh all     # configures Claude Code, VSCode Copilot, and AmpCode
 ```
 
-📖 **See [Getting Started](GETTING-STARTED.md)** for detailed setup and example prompts.
+Restart your tools and test: *"List all Airflow DAGs"*
+
+📖 **See [Getting Started](GETTING-STARTED.md)** for detailed setup, disable/enable workflow, and example prompts.
 
 ---
 
-## Debug Mode
+## Authentication
 
-### Non-Headless Login (See Browser)
+The server uses **basic auth** with a shared read-only Airflow account. Credentials are stored in `.env` (gitignored) and injected into generated MCP configs by `setup-mcp.sh`.
 
-```bash
-AIRFLOW_HOST=https://airflow.example.com \
-AIRFLOW_SSO_AUTH=true \
-AIRFLOW_HEADLESS=false \
-AIRFLOW_STATE_DIR=./.airflow_state \
-uv run mcp-server-apache-airflow
-```
+Auth priority in `create_api_client()`:
+1. **JWT Token** — if `AIRFLOW_JWT_TOKEN` is set
+2. **Basic Auth** — if `AIRFLOW_USERNAME` and `AIRFLOW_PASSWORD` are set
+3. **Unauthenticated** — fallback (logs a warning)
 
-### Verbose Output
+---
 
-The SSO module prints status to stderr:
-```
-Using SSO cookie-based authentication for Airflow
-[SSO] API probe status: 302
-[SSO] API probe status: 200
-[SSO] Captured 5 cookies
-```
+## Environment Variables
 
-### Force Re-Authentication
-
-```bash
-# Delete cached cookies to trigger fresh login
-rm -f $AIRFLOW_STATE_DIR/cookies.enc
-```
+| Variable              | Default                 | Description                                              |
+| --------------------- | ----------------------- | -------------------------------------------------------- |
+| `AIRFLOW_HOST`        | `http://localhost:8080` | Airflow base URL (required)                              |
+| `AIRFLOW_USERNAME`    | —                       | Basic auth username                                      |
+| `AIRFLOW_PASSWORD`    | —                       | Basic auth password                                      |
+| `AIRFLOW_JWT_TOKEN`   | —                       | JWT bearer token (alternative to basic auth)             |
+| `AIRFLOW_API_VERSION` | `v1`                    | REST API version (`v1` for Airflow 2.x)                  |
+| `AIRFLOW_VERIFY`      | `true`                  | TLS verification (`true`, `false`, or path to CA bundle) |
+| `READ_ONLY`           | `false`                 | Restrict to read-only API operations                     |
 
 ---
 
 ## Troubleshooting
 
-| Error                                               | Cause                                          | Fix                                             |
-| --------------------------------------------------- | ---------------------------------------------- | ----------------------------------------------- |
-| `InvalidToken` exception on startup                 | Key/cookie mismatch (key rotated or corrupted) | Delete `cookies.enc` and `key`, re-authenticate |
-| Browser doesn't open                                | Playwright not installed                       | Run `uv run playwright install chromium`        |
-| `403 Forbidden` after login                         | Cookies not captured correctly                 | Ensure SSO redirects back to Airflow domain     |
-| `Login did not yield an authorized browser session` | SSO login timed out (5 min)                    | Complete login faster, or check network issues  |
-| SSL certificate errors                              | Self-signed or internal CA                     | Set `AIRFLOW_VERIFY=false` or path to CA bundle |
-| `No 'session' cookie captured` warning              | Airflow uses different cookie name             | Usually safe to ignore; auth may still work     |
-| Cookies expire too quickly                          | IdP session shorter than 24h                   | Lower `AIRFLOW_MAX_COOKIE_AGE_HOURS`            |
-| `Cookie file corrupted` warning                     | Disk issue or interrupted write                | Automatic recovery; re-auth triggered           |
-| `ENOTFOUND` or DNS resolution fails                 | VPN DNS not propagating to all apps            | Run `sudo ./update-hosts.sh` (see below)        |
+| Error                               | Cause                               | Fix                                        |
+| ----------------------------------- | ----------------------------------- | ------------------------------------------ |
+| `401 Unauthorized`                  | Wrong credentials                   | Check `.env` username/password             |
+| `ENOTFOUND` or DNS resolution fails | VPN DNS not propagating to all apps | Run `sudo ./update-hosts.sh` (see below)   |
+| SSL certificate errors              | Self-signed or internal CA          | Set `AIRFLOW_VERIFY=false` in `.env`       |
+| MCP server not loading              | Config not found                    | Run `./setup-mcp.sh all` and restart tools |
 
 ### VPN DNS Issues
 
-Some apps (curl, Python, MCP servers) may fail to resolve internal hostnames like `pidgey.ready-internal.net` even when connected to VPN. This happens when the app bypasses VPN DNS.
+Some apps may fail to resolve internal hostnames like `pidgey.ready-internal.net` even when connected to VPN.
 
 **Fix:** Use [`update-hosts.sh`](update-hosts.sh) to write the resolved IP directly to `/etc/hosts`:
 
@@ -275,79 +76,47 @@ sudo crontab -e
 # Add: */30 * * * * /path/to/update-hosts.sh >> /var/log/hosts-update.log 2>&1
 ```
 
-The script resolves the hostname via VPN DNS (`nslookup`) and updates `/etc/hosts` so all apps can reach the internal server.
+---
 
-### Reset All State
+## Available Tools
+
+The MCP server exposes Airflow API operations as tools. With `READ_ONLY=true` set, only read operations are available.
+
+| Module          | Operations                                     |
+| --------------- | ---------------------------------------------- |
+| DAGs            | List, get details, pause/unpause               |
+| DAG Runs        | List, get details, trigger, clear              |
+| Task Instances  | List, get details, set state                   |
+| Variables       | List, get, create, update, delete              |
+| Connections     | List, get, create, update, delete              |
+| Pools           | List, get, create, update, delete              |
+| Datasets        | List, get, get events                          |
+| Event Log       | List events                                    |
+| Import Errors   | List                                           |
+| Monitoring      | Health check                                   |
+| Plugins         | List                                           |
+| Providers       | List                                           |
+| Config          | Get configuration                              |
+| XCom            | List, get                                      |
+
+---
+
+## Setup Script
+
+[`setup-mcp.sh`](setup-mcp.sh) manages MCP configs for Claude Code, VSCode Copilot, and AmpCode:
 
 ```bash
-rm -rf $AIRFLOW_STATE_DIR
-# Fresh start on next run
+./setup-mcp.sh all      # Setup all three tools
+./setup-mcp.sh disable  # Disable all (when not on VPN)
+./setup-mcp.sh enable   # Re-enable all
+./setup-mcp.sh status   # Show current status
 ```
+
+Configs are generated from `.example.json` templates by substituting `$PROJECT_DIR` and credentials from `.env`. Generated configs are gitignored.
 
 ---
 
+## Notes
 
-## Security Considerations
-
-| Aspect                  | Implementation                                    |
-| ----------------------- | ------------------------------------------------- |
-| **Cookie encryption**   | Fernet (AES-128-CBC + HMAC-SHA256)                |
-| **File permissions**    | Key and cookies stored with `0600` (owner-only)   |
-| **Key storage**         | Local file or environment variable (not in repo)  |
-| **TLS verification**    | Enabled by default; disable only for testing      |
-| **Session hijacking**   | Cookies tied to Airflow domain; encrypted at rest |
-| **Credential exposure** | No passwords stored; only session cookies         |
-
-### Recommendations
-
-1. **Never commit** `STATE_DIR` contents to version control
-2. **Add to `.gitignore`:**
-   ```
-   .airflow_state/
-   ```
-3. **Use short cookie TTL** in production (`AIRFLOW_MAX_COOKIE_AGE_HOURS=8`)
-4. **Rotate keys periodically** by deleting key file
-
----
-
-## API Reference
-
-### `AirflowCookieAuth`
-
-```python
-from src.airflow.sso_cookie_auth import AirflowAuthConfig, AirflowCookieAuth
-
-cfg = AirflowAuthConfig(
-    base_url="https://airflow.example.com",
-    state_dir="~/.airflow_state",
-    headless=False,
-    verify=True,
-    max_cookie_age_hours=24,
-)
-
-auth = AirflowCookieAuth(cfg)
-
-# Get authenticated requests.Session
-session = auth.ensure_session()
-response = session.get("https://airflow.example.com/api/v1/dags")
-
-# Get raw cookie header for SDK injection
-cookie_header = auth.get_cookie_header()
-# Returns: "session=abc123; other_cookie=xyz"
-```
-
-### `EncryptedCookieStore`
-
-```python
-from src.airflow.sso_cookie_auth import EncryptedCookieStore
-
-store = EncryptedCookieStore(state_dir="~/.airflow_state")
-
-# Save cookies
-store.save({"cookies": [...], "captured_at": 1706198400})
-
-# Load cookies (returns None if missing/corrupted)
-payload = store.load()
-```
-
----
+- ⚠️ **Airflow 2.x EOL: April 2026** — This server targets Airflow 2.x (`/api/v1`). Migration to Airflow 3.0 (`/api/v2`) requires updates to API version and possibly JWT auth.
+- 📖 See [Airflow MCP Servers](AIRFLOW-MCP-SERVERS.md) for alternative servers and v3 migration notes.

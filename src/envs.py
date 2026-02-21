@@ -6,18 +6,12 @@ from urllib.parse import urlparse
 _airflow_host_raw = os.getenv("AIRFLOW_HOST", "http://localhost:8080")
 AIRFLOW_HOST = urlparse(_airflow_host_raw)._replace(path="").geturl().rstrip("/")
 
-# Authentication - supports SSO cookie auth, JWT token, and basic auth
-# Priority: SSO Cookie > JWT Token > Basic Auth
+# Authentication - supports JWT token and basic auth
+# Priority: JWT Token > Basic Auth
 AIRFLOW_USERNAME = os.getenv("AIRFLOW_USERNAME")
 AIRFLOW_PASSWORD = os.getenv("AIRFLOW_PASSWORD")
 AIRFLOW_JWT_TOKEN = os.getenv("AIRFLOW_JWT_TOKEN")
 AIRFLOW_API_VERSION = os.getenv("AIRFLOW_API_VERSION", "v1")
-
-# SSO Cookie-based authentication (for enterprise IdPs like Okta, Azure AD, etc.)
-AIRFLOW_SSO_AUTH = os.getenv("AIRFLOW_SSO_AUTH", "false").lower() in ("true", "1", "yes", "on")
-AIRFLOW_STATE_DIR = os.getenv("AIRFLOW_STATE_DIR", os.path.expanduser("~/.airflow_cookie_state"))
-AIRFLOW_HEADLESS = os.getenv("AIRFLOW_HEADLESS", "false").lower() in ("true", "1", "yes", "on")
-AIRFLOW_MAX_COOKIE_AGE_HOURS = int(os.getenv("AIRFLOW_MAX_COOKIE_AGE_HOURS", "24"))
 
 # TLS verification: true, false, or path to CA bundle
 _verify_env = os.getenv("AIRFLOW_VERIFY", "true").strip()

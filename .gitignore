@@ -23,11 +23,13 @@ wheels/
 .ruff_cache/
 
 # Virtual Environment
-.env
 .venv
 env/
 venv/
 ENV/
+
+# Credentials (gitignored — copy .env.example to .env and fill in password)
+.env
 
 # IDE
 .idea/
@@ -39,10 +41,6 @@ ENV/
 # OS
 .DS_Store
 Thumbs.db
-
-# Airflow MCP SSO State (contains encrypted cookies and keys)
-.airflow_state/
-*.airflow_state/
 
 # Personal MCP configs (gitignored - run ./setup-mcp.sh to create from examples)
 .mcp.json

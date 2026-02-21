@@ -1,26 +1,24 @@
 {
   "_readme": [
     "VSCode GitHub Copilot MCP config - place at .vscode/mcp.json",
-    "Run: ./setup-mcp.sh rest (auto-replaces $PROJECT_DIR)",
-    "Or copy this file to .vscode/mcp.json and replace $PROJECT_DIR with actual path",
+    "Run: ./setup-mcp.sh vscode (auto-replaces $PROJECT_DIR and credentials from .env)",
+    "Or copy this file to .vscode/mcp.json and replace placeholders manually",
     "Note: Uses 'servers' key (not 'mcpServers') for VSCode Copilot format"
   ],
   "servers": {
-    "airflow-sso": {
+    "airflow-dev": {
       "command": "uv",
       "args": [
         "run",
         "--directory",
         "$PROJECT_DIR",
-        "--extra",
-        "sso",
         "mcp-server-apache-airflow"
       ],
       "env": {
         "AIRFLOW_HOST": "https://pidgey.ready-internal.net",
-        "AIRFLOW_SSO_AUTH": "true",
+        "AIRFLOW_USERNAME": "$AIRFLOW_USERNAME",
+        "AIRFLOW_PASSWORD": "$AIRFLOW_PASSWORD",
         "AIRFLOW_VERIFY": "false",
-        "AIRFLOW_STATE_DIR": "$PROJECT_DIR/.airflow_state",
         "READ_ONLY": "true"
       }
     }

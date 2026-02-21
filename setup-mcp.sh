@@ -17,19 +17,18 @@
 #   See: https://ampcode.com/manual#configuration
 #
 # HOW IT WORKS:
+#   - Copy .env.example to .env and fill in credentials (gitignored)
 #   - Example files (.example.json) are committed to git as templates
-#   - This script copies them to active configs, replacing $PROJECT_DIR with actual path
+#   - This script sources .env and copies templates to active configs,
+#     replacing $PROJECT_DIR and credentials with actual values
 #   - Personal configs are gitignored
-#   - All tools share the same SSO cookies in .airflow_state/
 #
-# RECOMMENDED SETUP ORDER:
-#   1. ./setup-mcp.sh claude   → Restart Claude Code → Complete SSO login
-#   2. Test in Claude Code: "List all Airflow DAGs"
-#   3. ./setup-mcp.sh vscode   → Restart VSCode (cookies already saved)
-#   4. ./setup-mcp.sh ampcode  → Adds to VSCode settings → Restart AmpCode
+# FIRST TIME SETUP:
+#   cp .env.example .env   # fill in AIRFLOW_PASSWORD
+#   ./setup-mcp.sh all
 #
 # WHEN NOT ON VPN:
-#   ./setup-mcp.sh disable     → Avoid login prompts on tool startup
+#   ./setup-mcp.sh disable     → Avoid connection timeouts on tool startup
 #   ./setup-mcp.sh enable      → Re-enable when back on VPN
 #
 # CROSS-REPO SUPPORT:
@@ -37,17 +36,32 @@
 #   Override with .mcp-repos file (one path per line, relative to this script).
 #
 # Usage:
-#   ./setup-mcp.sh claude   # Setup Claude Code (triggers SSO login)
-#   ./setup-mcp.sh vscode   # Setup VSCode Copilot (reuses SSO cookies)
+#   ./setup-mcp.sh claude   # Setup Claude Code
+#   ./setup-mcp.sh vscode   # Setup VSCode Copilot
 #   ./setup-mcp.sh ampcode  # Setup AmpCode (adds to VSCode settings)
 #   ./setup-mcp.sh all      # Setup all three tools
-#   ./setup-mcp.sh disable  # Disable all MCP configs (no login prompts)
+#   ./setup-mcp.sh disable  # Disable all MCP configs
 #   ./setup-mcp.sh enable   # Re-enable all MCP configs
-#   ./setup-mcp.sh status   # Show current status
+#   ./setup-mcp.sh status   # Show current config status
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ============================================================================
+# LOAD CREDENTIALS FROM .env
+# ============================================================================
+
+ENV_FILE="$SCRIPT_DIR/.env"
+if [ -f "$ENV_FILE" ]; then
+    set -a
+    # shellcheck source=/dev/null
+    source "$ENV_FILE"
+    set +a
+else
+    # Allow status/disable/enable without credentials, but warn for setup commands
+    _env_missing=true
+fi
 
 # ============================================================================
 # CONFIG FILE PATHS
@@ -120,18 +134,32 @@ log_info() { echo -e "${GREEN}✓${NC} $1"; }
 log_warn() { echo -e "${YELLOW}⚠${NC} $1"; }
 log_error() { echo -e "${RED}✗${NC} $1"; }
 
+check_env() {
+    if [ "${_env_missing:-false}" = "true" ]; then
+        log_error ".env not found — copy .env.example to .env and fill in credentials"
+        echo "  cp .env.example .env"
+        exit 1
+    fi
+    if [ -z "${AIRFLOW_USERNAME:-}" ] || [ -z "${AIRFLOW_PASSWORD:-}" ]; then
+        log_error "AIRFLOW_USERNAME or AIRFLOW_PASSWORD not set in .env"
+        exit 1
+    fi
+}
+
 show_help() {
     echo ""
     echo -e "${BLUE}Airflow MCP Setup${NC}"
     echo ""
+    echo "First time: cp .env.example .env  (fill in credentials)"
+    echo ""
     echo "Setup commands:"
-    echo "  claude   Setup Claude Code (triggers SSO login)"
+    echo "  claude   Setup Claude Code"
     echo "  vscode   Setup VSCode Copilot"
     echo "  ampcode  Setup AmpCode (modifies VSCode settings)"
     echo "  all      Setup all three tools"
     echo ""
     echo "Toggle commands:"
-    echo "  disable  Disable all MCP configs (no login prompts when off VPN)"
+    echo "  disable  Disable all MCP configs (when not on VPN)"
     echo "  enable   Re-enable all MCP configs"
     echo "  status   Show current config status"
     echo ""
@@ -140,15 +168,15 @@ show_help() {
 # ============================================================================
 # AMPCODE HELPERS (VSCode Settings Manipulation)
 # ============================================================================
-# Uses Python to safely add/remove airflow-sso in VSCode settings.json.
+# Uses Python to safely add/remove airflow-dev in VSCode settings.json.
 # NOTE: AmpCode ignores "disabled": true, so we must fully remove the config.
-# - ampcode_add: Adds airflow-sso config to amp.mcpServers
-# - ampcode_remove: Removes airflow-sso config entirely (for disable)
+# - ampcode_add: Adds airflow-dev config to amp.mcpServers
+# - ampcode_remove: Removes airflow-dev config entirely (for disable)
 # ============================================================================
 
 ampcode_exists() {
     if [ -f "$AMPCODE_SETTINGS" ]; then
-        grep -q '"airflow-sso"' "$AMPCODE_SETTINGS" 2>/dev/null
+        grep -q '"airflow-dev"' "$AMPCODE_SETTINGS" 2>/dev/null
         return $?
     fi
     return 1
@@ -161,9 +189,12 @@ ampcode_add() {
     fi
 
     if ampcode_exists; then
-        log_warn "AmpCode airflow-sso already exists"
+        log_warn "AmpCode airflow-dev already exists"
         return 0
     fi
+
+    local _username="${AIRFLOW_USERNAME:-}"
+    local _password="${AIRFLOW_PASSWORD:-}"
 
     # Use Python to safely add the entry
     python3 << EOF
@@ -174,21 +205,20 @@ import sys
 settings_path = "$AMPCODE_SETTINGS"
 project_dir = "$SCRIPT_DIR"
 
-# The airflow-sso config to add
+# The airflow-dev config to add
 airflow_config = {
-    "command": "/opt/homebrew/bin/uv",
+    "command": "uv",
     "args": [
         "run",
         "--directory",
         project_dir,
-        "--extra",
-        "sso",
         "mcp-server-apache-airflow"
     ],
     "env": {
         "AIRFLOW_HOST": "https://pidgey.ready-internal.net",
-        "AIRFLOW_SSO_AUTH": "true",
-        "AIRFLOW_STATE_DIR": f"{project_dir}/.airflow_state",
+        "AIRFLOW_USERNAME": "$_username",
+        "AIRFLOW_PASSWORD": "$_password",
+        "AIRFLOW_VERIFY": "false",
         "READ_ONLY": "true"
     }
 }
@@ -207,7 +237,7 @@ try:
         entry_json = json.dumps(airflow_config, indent=4)
         indented = '\n'.join('        ' + line if i > 0 else line
                             for i, line in enumerate(entry_json.split('\n')))
-        new_entry = f'\n        "airflow-sso": {indented},'
+        new_entry = f'\n        "airflow-dev": {indented},'
 
         new_content = content[:insert_pos] + new_entry + content[insert_pos:]
 
@@ -225,10 +255,10 @@ EOF
 
     result=$?
     if [ $result -eq 0 ]; then
-        log_info "Added airflow-sso to AmpCode (VSCode settings)"
+        log_info "Added airflow-dev to AmpCode (VSCode settings)"
         return 0
     else
-        log_error "Failed to add airflow-sso to VSCode settings"
+        log_error "Failed to add airflow-dev to VSCode settings"
         echo "  You may need to add it manually. See GETTING-STARTED.md"
         return 1
     fi
@@ -243,7 +273,7 @@ ampcode_remove() {
         return 0  # Already removed
     fi
 
-    # Use Python to remove the entire airflow-sso entry
+    # Use Python to remove the entire airflow-dev entry
     python3 << EOF
 import re
 import sys
@@ -254,12 +284,11 @@ try:
     with open(settings_path, 'r') as f:
         content = f.read()
 
-    # Remove "airflow-sso": { ... }, entry
-    # Match the key and its entire nested object value, plus trailing comma
+    # Remove "airflow-dev": { ... }, entry
     # Use a balanced brace matching approach for nested objects
 
-    # Find start of airflow-sso
-    start_pattern = r'\s*"airflow-sso"\s*:\s*\{'
+    # Find start of airflow-dev
+    start_pattern = r'\s*"airflow-dev"\s*:\s*\{'
     match = re.search(start_pattern, content)
 
     if match:
@@ -302,7 +331,7 @@ EOF
 
     result=$?
     if [ $result -eq 0 ]; then
-        log_info "Removed airflow-sso from AmpCode (VSCode settings)"
+        log_info "Removed airflow-dev from AmpCode (VSCode settings)"
         return 0
     fi
     return 1
@@ -350,13 +379,12 @@ show_status() {
         echo -e "  AmpCode      (VSCode settings.json)  ${RED}disabled${NC}"
     fi
 
-    # SSO cookies
-    if [ -d "$SCRIPT_DIR/.airflow_state" ]; then
-        echo ""
-        echo -e "  SSO cookies  (.airflow_state/)       ${GREEN}saved${NC}"
+    # .env credentials
+    echo ""
+    if [ -f "$ENV_FILE" ] && [ -n "${AIRFLOW_USERNAME:-}" ]; then
+        echo -e "  Credentials  (.env)                  ${GREEN}loaded${NC}"
     else
-        echo ""
-        echo -e "  SSO cookies  (.airflow_state/)       ${YELLOW}not yet${NC}"
+        echo -e "  Credentials  (.env)                  ${YELLOW}missing — cp .env.example .env${NC}"
     fi
 
     # External repos
@@ -427,8 +455,11 @@ create_config() {
         return 0
     fi
 
-    # Replace $PROJECT_DIR — always points to SCRIPT_DIR so SSO cookies are shared
-    sed "s|\\\$PROJECT_DIR|$SCRIPT_DIR|g" "$example" > "$config"
+    # Replace $PROJECT_DIR and credentials — always points to SCRIPT_DIR so config is shared
+    sed -e "s|\\\$PROJECT_DIR|$SCRIPT_DIR|g" \
+        -e "s|\\\$AIRFLOW_USERNAME|${AIRFLOW_USERNAME}|g" \
+        -e "s|\\\$AIRFLOW_PASSWORD|${AIRFLOW_PASSWORD}|g" \
+        "$example" > "$config"
     log_info "Created $name"
 }
 
@@ -465,6 +496,7 @@ setup_external_repos_vscode() {
 # ============================================================================
 
 setup_claude() {
+    check_env
     echo ""
     echo -e "${BLUE}Setting up Claude Code...${NC}"
     echo ""
@@ -473,13 +505,12 @@ setup_claude() {
     echo ""
     echo "Next steps:"
     echo "  1. Restart Claude Code in this project"
-    echo "  2. SSO login will open in browser"
-    echo "  3. Test: ask Claude to list Airflow DAGs"
-    echo "  4. Run: ./setup-mcp.sh vscode"
+    echo "  2. Test: ask Claude to list Airflow DAGs"
     echo ""
 }
 
 setup_vscode() {
+    check_env
     echo ""
     echo -e "${BLUE}Setting up VSCode Copilot...${NC}"
     echo ""
@@ -487,22 +518,22 @@ setup_vscode() {
     setup_external_repos_vscode
     echo ""
     echo "Restart VSCode to load MCP."
-    echo "SSO cookies are shared - no re-login needed."
     echo ""
 }
 
 setup_ampcode() {
+    check_env
     echo ""
     echo -e "${BLUE}Setting up AmpCode...${NC}"
     echo ""
     ampcode_add
     echo ""
     echo "Restart VSCode/AmpCode to load MCP."
-    echo "SSO cookies are shared - no re-login needed."
     echo ""
 }
 
 setup_all() {
+    check_env
     echo ""
     echo -e "${BLUE}Setting up all tools...${NC}"
     echo ""
@@ -512,8 +543,7 @@ setup_all() {
     setup_external_repos_claude
     setup_external_repos_vscode
     echo ""
-    echo "Restart Claude Code first to trigger SSO login."
-    echo "Other tools will reuse the saved cookies."
+    echo "Restart Claude Code, VSCode, and AmpCode to load MCP."
     echo ""
 }
 
@@ -572,7 +602,7 @@ disable_all() {
         log_warn "No configs to disable"
     else
         echo ""
-        echo "Restart your tools - no MCP login prompts."
+        echo "Restart your tools."
         echo "Run './setup-mcp.sh enable' to re-enable."
     fi
     echo ""

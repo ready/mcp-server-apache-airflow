@@ -11,44 +11,36 @@ Quick setup and example prompts for using the Airflow MCP with AI coding assista
 ```bash
 git clone git@github.com:ready/mcp-server-apache-airflow.git
 cd mcp-server-apache-airflow
-uv sync --extra sso
-uv run playwright install chromium
+cp .env.example .env   # then fill in AIRFLOW_PASSWORD (ask data team lead)
+uv sync
 ```
 
-### 2. Configure Claude Code
+### 2. Configure all tools at once
 
 ```bash
-./setup-mcp.sh claude
+./setup-mcp.sh all
 ```
 
-Restart Claude Code → SSO login opens → Test: *"List all Airflow DAGs"*
+Restart Claude Code, VSCode, and AmpCode → test: *"List all Airflow DAGs"*
 
-### 3. Configure VSCode Copilot
+Or configure tools individually:
 
 ```bash
-./setup-mcp.sh vscode
+./setup-mcp.sh claude   # Claude Code only
+./setup-mcp.sh vscode   # VSCode Copilot only
+./setup-mcp.sh ampcode  # AmpCode only
 ```
-
-Restart VSCode → uses saved SSO cookies.
-
-### 4. Configure AmpCode
-
-```bash
-./setup-mcp.sh ampcode
-```
-
-Restart VSCode/AmpCode → uses saved SSO cookies.
 
 > **Note:** Amp VSCode Extension reads from global VSCode settings, not project files.
-> The script adds `airflow-sso` to `~/Library/Application Support/Code/User/settings.json`.
+> The script adds `airflow-dev` to `~/Library/Application Support/Code/User/settings.json`.
 > Unlike Claude Code/VSCode, AmpCode ignores `"disabled": true` — so we must fully remove
 > the config when disabling (and re-add when enabling).
 > See [ampcode.com/manual](https://ampcode.com/manual#configuration) for details.
 
-### 5. Disable When Not on VPN
+### 3. Disable When Not on VPN
 
 ```bash
-./setup-mcp.sh disable   # Disables all MCP configs (no login prompts)
+./setup-mcp.sh disable   # Disables all MCP configs (avoids connection timeouts)
 ./setup-mcp.sh enable    # Re-enable when back on VPN
 ./setup-mcp.sh status    # Check current status
 ```
@@ -59,19 +51,15 @@ Restart VSCode/AmpCode → uses saved SSO cookies.
 | -------------- | ------------------------------------------ | -------------- |
 | Claude Code    | Renames `.mcp.json` → `.mcp.json.disabled` | Restores file  |
 | VSCode Copilot | Renames `.vscode/mcp.json` → `.disabled`   | Restores file  |
-| AmpCode        | Removes `airflow-sso` from VSCode settings | Re-adds config |
+| AmpCode        | Removes `airflow-dev` from VSCode settings | Re-adds config |
 
 These actions apply to both the MCP server repo and external repos (see below).
 
-> **Why not `"disabled": true` for AmpCode?** We tried toggling a `"disabled"` property (like
-> other MCP clients support), but AmpCode ignores it and still attempts to connect — launching
-> the Chromium SSO browser even when off VPN. Full removal is required to silence it.
-
-### 6. Cross-Repo Support
+### 4. Cross-Repo Support
 
 `setup`, `disable`, `enable`, and `status` automatically manage MCP configs in external repos — by default `../airflow`. This means when you run Claude Code or VSCode in the airflow repo, the Airflow MCP server is available there too.
 
-The generated configs in external repos point `--directory` back to this MCP server repo, so SSO cookies in `.airflow_state/` are shared.
+The generated configs in external repos point `--directory` back to this MCP server repo.
 
 **Custom repo list:** Create a `.mcp-repos` file (gitignored) to override the default:
 
@@ -89,13 +77,11 @@ If `.mcp-repos` doesn't exist, the default is `../airflow`.
 
 **Daily workflow:** Once initial setup is done, just use:
 ```bash
-./setup-mcp.sh enable    # Reconnects all 3 agents when back on VPN
+./setup-mcp.sh enable    # Reconnects all agents when back on VPN
 ./setup-mcp.sh disable   # Disconnects all when leaving VPN
 ```
 
-**First-time setup shortcut:** After step 2 (Claude Code + SSO login), you can skip steps 3-4 and just run `./setup-mcp.sh enable` — it will configure all three tools at once.
-
-**When SSO token expires:** Don't use `enable`. Instead, run `./setup-mcp.sh claude` first to trigger fresh SSO login, then `./setup-mcp.sh enable` for the rest.
+**Credentials stored in:** `.env` (gitignored). If you need to update the password, edit `.env` then re-run `./setup-mcp.sh all` (delete existing configs first if they already exist).
 
 ---
 
